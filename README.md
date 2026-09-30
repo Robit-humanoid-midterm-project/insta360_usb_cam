@@ -2,7 +2,7 @@
 
 ## udev rule
 
-Fix the Insta360 Link to `/dev/video-insta360`.
+By default, the launch file uses `/dev/video-insta360` if it exists. Otherwise it finds the Insta360 Link capture node (index 0) automatically. The udev alias below is optional.
 
 ```bash
 sudo nano /etc/udev/rules.d/99-insta360.rules
@@ -41,3 +41,9 @@ source install/setup.bash
 ```bash
 ros2 launch insta360_usb_cam usb_cam.launch.py
 ```
+
+To select a device explicitly, use `device:=/dev/videoN`. The launch fails with an error if that path does not exist or automatic detection does not find exactly one capture node.
+
+## 수정부분
+
+자동 탐색과 device:=/dev/videoN 직접 지정 방법
