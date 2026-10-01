@@ -22,7 +22,10 @@
     focus: -1
     auto_focus: false
     zoom: -1
-    pan: -1
+    # Nominal center; adjust after checking the mounted camera view.
+    pan: 0
+    # Keep ROS pan commands from moving the camera after startup.
+    pan_locked: true
     tilt: -1  
     rotate: -1
     horizontal_flip: false

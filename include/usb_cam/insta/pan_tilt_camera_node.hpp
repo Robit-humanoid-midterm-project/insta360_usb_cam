@@ -90,6 +90,7 @@ private:
       pan, tilt, rotate;
   int image_width, image_height;
   bool auto_whitebalance, auto_exposure, auto_focus, horizontal_flip, vertical_flip;
+  bool pan_locked = false;
 
   std::string output_resolution_str, compressed_camera_info_topic;
   int out_w_ = 640, out_h_ = 480;

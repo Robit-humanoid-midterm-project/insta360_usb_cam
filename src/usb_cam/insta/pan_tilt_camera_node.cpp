@@ -28,6 +28,11 @@ PanTiltCamera::on_configure(const rclcpp_lifecycle::State &)
   camera_ = std::make_shared<usb_cam>();
 
   get_param();
+  if (pan_locked && pan == -1)
+  {
+    RCLCPP_ERROR(this->get_logger(), "pan_locked requires a concrete pan value in camera_config.yaml");
+    return rclcpp_lifecycle::node_interfaces::LifecycleNodeInterface::CallbackReturn::FAILURE;
+  }
   int width, height;
   sscanf(resolution_str.c_str(), "%dx%d", &width, &height);
 
@@ -383,6 +388,12 @@ rcl_interfaces::msg::SetParametersResult PanTiltCamera::on_parameter_change(
 
   for (const auto &param : parameters)
   {
+    if (pan_locked && (param.get_name() == "pan" || param.get_name() == "pan_locked"))
+    {
+      result.successful = false;
+      result.reason = "Pan is locked by camera_config.yaml; change pan there and restart";
+      return result;
+    }
     if (param.get_name() == "brightness")
     {
       brightness = param.as_int();
@@ -498,7 +509,7 @@ rcl_interfaces::msg::SetParametersResult PanTiltCamera::on_parameter_change(
 
 void PanTiltCamera::pan_tilt_callback(const insta360_usb_cam::msg::InstaPanTiltMsgs::SharedPtr msg)
 {
-  if (msg->pan != pan || msg->pan == pan)
+  if (!pan_locked && msg->pan != pan)
   {
     set_param("pan", msg->pan);
     pan = msg->pan;
@@ -542,6 +553,7 @@ void PanTiltCamera::get_param()
   auto_focus = this->declare_parameter<bool>("auto_focus", true);
   zoom = this->declare_parameter<int>("zoom", -1);
   pan = this->declare_parameter<int>("pan", -1);
+  pan_locked = this->declare_parameter<bool>("pan_locked", false);
   tilt = this->declare_parameter<int>("tilt", -1);
   rotate = this->declare_parameter<int>("rotate", -1);
   horizontal_flip = this->declare_parameter<bool>("horizontal_flip", false);
