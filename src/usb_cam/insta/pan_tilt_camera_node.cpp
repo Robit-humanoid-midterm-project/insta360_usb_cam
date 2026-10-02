@@ -28,9 +28,9 @@ PanTiltCamera::on_configure(const rclcpp_lifecycle::State &)
   camera_ = std::make_shared<usb_cam>();
 
   get_param();
-  if (pan_locked && pan == -1)
+  if ((pan_locked && pan == -1) || (tilt_locked && tilt == -1))
   {
-    RCLCPP_ERROR(this->get_logger(), "pan_locked requires a concrete pan value in camera_config.yaml");
+    RCLCPP_ERROR(this->get_logger(), "Locked axes require concrete pan/tilt values in camera_config.yaml");
     return rclcpp_lifecycle::node_interfaces::LifecycleNodeInterface::CallbackReturn::FAILURE;
   }
   int width, height;
@@ -177,6 +177,21 @@ PanTiltCamera::on_configure(const rclcpp_lifecycle::State &)
       std::bind(&PanTiltCamera::pan_tilt_callback, this, std::placeholders::_1));
 
   set_camera();
+  // Confirm the device accepted each locked target before starting publication.
+  for (const auto &axis : {std::make_pair("pan", pan_locked),
+                           std::make_pair("tilt", tilt_locked)})
+  {
+    if (!axis.second) continue;
+    const int target = std::string(axis.first) == "pan" ? pan : tilt;
+    const int id = camera_->get_control_by_name(axis.first);
+    if (!camera_->set_control(id, target) || camera_->get_control(id) != target)
+    {
+      RCLCPP_ERROR(get_logger(), "Failed to establish locked %s target %d", axis.first, target);
+      camera_->stop_stream();
+      return rclcpp_lifecycle::node_interfaces::LifecycleNodeInterface::CallbackReturn::FAILURE;
+    }
+    RCLCPP_INFO(get_logger(), "Locked %s target accepted: %d (device units)", axis.first, target);
+  }
   if (!initialize_pan_tilt_information())
   {
     return rclcpp_lifecycle::node_interfaces::LifecycleNodeInterface::CallbackReturn::FAILURE;
@@ -325,7 +340,7 @@ PanTiltCamera::on_deactivate(const rclcpp_lifecycle::State &)
 
   timer_.reset();
 
-  image_pub_->on_deactivate();
+  if (image_pub_) image_pub_->on_deactivate();
   compressed_image_pub_->on_deactivate();
   camera_info_pub_->on_deactivate();
   compressed_camera_info_pub_->on_deactivate();
@@ -386,6 +401,19 @@ rcl_interfaces::msg::SetParametersResult PanTiltCamera::on_parameter_change(
   rcl_interfaces::msg::SetParametersResult result;
   result.successful = true;
 
+  // Reject the entire request before applying any hardware side effects.
+  for (const auto &param : parameters)
+  {
+    const auto &name = param.get_name();
+    if ((pan_locked && (name == "pan" || name == "pan_locked")) ||
+        (tilt_locked && (name == "tilt" || name == "tilt_locked")) ||
+        ((pan_locked || tilt_locked) && name == "rotate"))
+    {
+      result.successful = false;
+      result.reason = "Camera orientation is locked; change configuration and restart";
+      return result;
+    }
+  }
   for (const auto &param : parameters)
   {
     if (pan_locked && (param.get_name() == "pan" || param.get_name() == "pan_locked"))
@@ -514,7 +542,7 @@ void PanTiltCamera::pan_tilt_callback(const insta360_usb_cam::msg::InstaPanTiltM
     set_param("pan", msg->pan);
     pan = msg->pan;
   }
-  if (msg->tilt != tilt || msg->tilt == tilt)
+  if (!tilt_locked && msg->tilt != tilt)
   {
     set_param("tilt", msg->tilt);
     tilt = msg->tilt;
@@ -555,6 +583,7 @@ void PanTiltCamera::get_param()
   pan = this->declare_parameter<int>("pan", -1);
   pan_locked = this->declare_parameter<bool>("pan_locked", false);
   tilt = this->declare_parameter<int>("tilt", -1);
+  tilt_locked = this->declare_parameter<bool>("tilt_locked", false);
   rotate = this->declare_parameter<int>("rotate", -1);
   horizontal_flip = this->declare_parameter<bool>("horizontal_flip", false);
   vertical_flip = this->declare_parameter<bool>("vertical_flip", false);

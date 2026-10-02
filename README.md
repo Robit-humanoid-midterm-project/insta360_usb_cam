@@ -51,3 +51,14 @@ To select a device explicitly, use `device:=/dev/videoN`. The launch fails with 
 ## Camera pan center and lock
 
 `config/camera_config.yaml` sets `pan: 0` as the nominal center at startup and `pan_locked: true` to ignore `/camera1/pan_tilt` pan commands and reject runtime `pan` parameter changes. Tilt remains adjustable. To fine-tune the mounted camera heading, change `pan` in the YAML and restart the camera node. Verify the center visually: the actual motor position and any camera-internal tracking mode are not measured by this configuration.
+
+## Fixed zero orientation
+
+The shipped configuration requests `pan: 0`, `tilt: 0`, and `rotate: 0`.
+`pan_locked: true` and `tilt_locked: true` block ROS topic commands for both
+axes and runtime orientation parameter changes. Startup checks that the device
+accepts and reports the requested pan/tilt targets; failure stops configuration.
+Unsupported image rotation controls may warn without stopping pan/tilt setup.
+These locks do not disable camera firmware tracking, manual repositioning, or
+commands issued by other programs. Device readback is a control target, not
+independent measurement of the physical lens angle.
