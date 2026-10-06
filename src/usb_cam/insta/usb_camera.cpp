@@ -1,9 +1,14 @@
+// 파일 역할: Linux V4L2 장치와 직접 통신하는 카메라 드라이버 구현.
+// 장치 정보 조회, 스트림 버퍼 관리, 영상 수신·디코딩·축소, 카메라 제어 값 읽기·쓰기를 담당한다.
+
 #include "../include/usb_cam/insta/usb_camera.hpp"
 
+// 아직 스트리밍하지 않는 상태와 유효하지 않은 장치 파일 번호(-1)로 초기화한다.
 usb_cam::usb_cam() : streaming(false), m_fd(-1)
 {
 }
 
+// 객체가 사라지기 전에 스트림 스레드, 공유 메모리 버퍼와 장치 파일을 정리한다.
 usb_cam::~usb_cam()
 {
   // stop_stream() 없이 파괴되면 stream_thread 가 joinable 인 채로 남아
@@ -11,6 +16,7 @@ usb_cam::~usb_cam()
   stop_stream();
 }
 
+// V4L2 제어 요청을 실행한다. 신호로 중단된 EINTR일 때만 같은 요청을 다시 시도한다.
 int usb_cam::xioctl(int fd, unsigned long request, void *arg)
 {
   int r;
@@ -21,6 +27,7 @@ int usb_cam::xioctl(int fd, unsigned long request, void *arg)
   return r;
 }
 
+// 장치를 잠시 열어 이름·드라이버와 지원 포맷·해상도·FPS 정보를 조회하고 닫는다.
 m_deviceInfo usb_cam::get_device_info(const std::string &devicePath)
 {
   m_deviceInfo devInfo;
@@ -47,6 +54,7 @@ m_deviceInfo usb_cam::get_device_info(const std::string &devicePath)
   fmt.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
   fmt.index = 0;
 
+  // 포맷을 하나씩 조회하고 그 안에서 고정 해상도와 프레임 간격 목록을 읽는다.
   while (xioctl(fd, VIDIOC_ENUM_FMT, &fmt) != -1)
   {
     std::string fmt_desc = (char *)fmt.description;
@@ -73,6 +81,7 @@ m_deviceInfo usb_cam::get_device_info(const std::string &devicePath)
         {
           if (frmival.type == V4L2_FRMIVAL_TYPE_DISCRETE)
           {
+            // 장치가 알려준 1프레임의 시간(분자/분모)을 초당 프레임 수로 역산한다.
             float fps =
                 static_cast<float>(frmival.discrete.denominator) / frmival.discrete.numerator;
             resInfo.fps.push_back(fps);
@@ -94,6 +103,8 @@ m_deviceInfo usb_cam::get_device_info(const std::string &devicePath)
   return devInfo;
 }
 
+// 요청한 포맷·해상도·FPS와 메모리 매핑 버퍼를 설정하고 수신 스레드를 시작한다.
+// 각 준비 단계의 실패는 STREAM_ERR_* 코드로 반환한다.
 v4l2_stream_err usb_cam::start_stream(const m_deviceConfig &config)
 {
   m_fd = open(config.path.c_str(), O_RDWR);
@@ -109,6 +120,7 @@ v4l2_stream_err usb_cam::start_stream(const m_deviceConfig &config)
   fmt.fmt.pix.width = config.resolution.first;
   fmt.fmt.pix.height = config.resolution.second;
 
+  // 요청 문자열을 V4L2 픽셀 포맷으로 매핑한다. 아래 수신 루프의 디코딩 경로와는 별도 설정이다.
   std::string normalized_format = normalize_format(config.format);
 
   if (normalized_format == "mjpeg")
@@ -159,6 +171,7 @@ v4l2_stream_err usb_cam::start_stream(const m_deviceConfig &config)
     return STREAM_ERR_FORMAT;
   }
 
+  // 프레임 간격을 1/FPS초로 요청한다. 실제 카메라가 설정을 받아들여야 적용된다.
   struct v4l2_streamparm streamparm;
   memset(&streamparm, 0, sizeof(streamparm));
   streamparm.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
@@ -172,6 +185,7 @@ v4l2_stream_err usb_cam::start_stream(const m_deviceConfig &config)
     return STREAM_ERR_FPS;
   }
 
+  // 장치가 쓰고 프로그램이 읽을 공유 버퍼 네 개를 요청한다.
   struct v4l2_requestbuffers req;
   memset(&req, 0, sizeof(req));
   req.count = 4;
@@ -203,6 +217,7 @@ v4l2_stream_err usb_cam::start_stream(const m_deviceConfig &config)
       return STREAM_ERR_QUERY_BUFFER;
     }
 
+    // 커널의 영상 버퍼를 사용자 공간 주소에 연결한다. 이후 영상 데이터는 이 주소로 읽는다.
     buffers[i] = mmap(nullptr, buf.length, PROT_READ | PROT_WRITE, MAP_SHARED, m_fd, buf.m.offset);
     buffer_lengths[i] = buf.length;
 
@@ -232,6 +247,7 @@ v4l2_stream_err usb_cam::start_stream(const m_deviceConfig &config)
   streaming = true;
 
   // Start the streaming thread
+  // 장치 영상 수신은 별도 스레드에서 수행한다. ROS 노드는 저장된 최신 영상을 타이머로 읽는다.
   stream_thread = std::thread([this, config]()
                               {
     while (streaming) {
@@ -240,6 +256,7 @@ v4l2_stream_err usb_cam::start_stream(const m_deviceConfig &config)
       buf.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
       buf.memory = V4L2_MEMORY_MMAP;
 
+      // 촬영이 끝난 버퍼를 가져온다. 처리가 끝나면 QBUF로 장치에 되돌려 다음 촬영에 재사용한다.
       if (xioctl(m_fd, VIDIOC_DQBUF, &buf) == -1) {
         CERR_ENDL("Failed to dequeue buffer");
         break;
@@ -249,10 +266,13 @@ v4l2_stream_err usb_cam::start_stream(const m_deviceConfig &config)
       // img = cv::imdecode(cv::Mat(1, buf.bytesused, CV_8UC1, buffers[buf.index]), cv::IMREAD_COLOR);
       // m_image = img.clone();
       
+      // 현재 구현은 압축된 이미지 바이트를 OpenCV로 디코딩하고 640×480으로 축소한다.
+      // 다른 픽셀 포맷을 설정하는 분기가 있어도 이 수신 경로가 자동으로 바뀌지는 않는다.
       cv::Mat img = cv::imdecode(cv::Mat(1, buf.bytesused, CV_8UC1, buffers[buf.index]), cv::IMREAD_COLOR);
       cv::Mat small;
       cv::resize(img, small, cv::Size(640, 480), 0, 0, cv::INTER_AREA);
       {
+        // 수신 스레드와 ROS 발행 타이머가 최신 영상 참조를 동시에 바꾸지 않도록 잠근다.
         std::lock_guard<std::mutex> lock(image_mutex);
         m_image = small;
       }
@@ -275,6 +295,8 @@ v4l2_stream_err usb_cam::start_stream(const m_deviceConfig &config)
 // 여러 번 불려도 안전하다. 소멸자에서도 그대로 호출한다.
 // start_stream() 이 도중에 실패해 streaming 이 false 인 채로 스레드나 fd 가
 // 남아 있는 경우가 있으므로 early-return 하지 않는다.
+// 수신을 멈추고 스레드 종료를 기다린 뒤 mmap 버퍼와 장치 파일을 해제한다.
+// 여러 번 호출되어도 이미 해제한 자원을 다시 사용하지 않도록 정리한다.
 void usb_cam::stop_stream()
 {
   streaming = false;
@@ -293,6 +315,7 @@ void usb_cam::stop_stream()
     }
   }
 
+  // 매핑했던 모든 버퍼를 해제하고 저장 영상도 비운 뒤 장치 파일을 닫는다.
   for (size_t i = 0; i < buffers.size(); ++i)
   {
     if (buffers[i] != MAP_FAILED)
@@ -312,6 +335,7 @@ void usb_cam::stop_stream()
   }
 }
 
+// 숫자 제어 ID와 값을 V4L2에 전달한다. 장치가 설정을 거부하면 false를 반환한다.
 bool usb_cam::set_control(int control_id, int value)
 {
   struct v4l2_control control;
@@ -331,11 +355,13 @@ bool usb_cam::set_control(int control_id, int value)
   return true;
 }
 
+// 문자열 설정 이름을 숫자 제어 ID로 바꿔 같은 설정 함수에 전달한다.
 bool usb_cam::set_control(std::string control_name, int value)
 {
   return set_control(get_control_by_name(control_name), value);
 }
 
+// 장치에 현재 제어 값을 요청한다. 읽기 실패 시 -1을 반환한다.
 int usb_cam::get_control(int control_id)
 {
   struct v4l2_control control;
@@ -354,11 +380,13 @@ int usb_cam::get_control(int control_id)
   return control.value;
 }
 
+// 문자열 설정 이름에 해당하는 현재 장치 값을 읽는다.
 int usb_cam::get_control(std::string control_name)
 {
   return get_control(get_control_by_name(control_name));
 }
 
+// 제어 항목의 지원 여부, 최소·최대·기본값·변경 간격을 조회한다. 비활성 항목은 false로 처리한다.
 bool usb_cam::query_control(int control_id, v4l2_queryctrl &queryctrl)
 {
   memset(&queryctrl, 0, sizeof(queryctrl));
@@ -389,11 +417,13 @@ bool usb_cam::query_control(int control_id, v4l2_queryctrl &queryctrl)
   return true;
 }
 
+// 설정 이름을 ID로 바꿔 제어 항목 정보를 조회한다.
 bool usb_cam::query_control(std::string control_name, v4l2_queryctrl &queryctrl)
 {
   return query_control(get_control_by_name(control_name), queryctrl);
 }
 
+// 조회 가능한 일반·일부 전용 제어 항목을 장치가 알려준 기본값으로 되돌린다.
 void usb_cam::reset_controls_to_default()
 {
   struct v4l2_queryctrl queryctrl;
@@ -423,6 +453,7 @@ void usb_cam::reset_controls_to_default()
   }
 }
 
+// 숫자 제어 ID를 오류·상태 출력에 쓸 사람이 읽을 수 있는 이름으로 바꾼다.
 std::string usb_cam::get_control_name(int control_id)
 {
   switch (control_id)
@@ -516,6 +547,7 @@ std::string usb_cam::get_control_name(int control_id)
   }
 }
 
+// YAML/ROS의 설정 이름을 V4L2 숫자 ID로 바꾼다. 알 수 없는 이름은 -1이다.
 int usb_cam::get_control_by_name(std::string name)
 {
   if (name == "brightness")
@@ -689,6 +721,7 @@ int usb_cam::get_control_by_name(std::string name)
   return -1;
 }
 
+// 대소문자와 장치별 포맷 별칭을 통일해 같은 포맷을 같은 문자열로 비교한다.
 std::string usb_cam::normalize_format(const std::string &format)
 {
   static std::unordered_map<std::string, std::string> format_map = {
@@ -705,6 +738,7 @@ std::string usb_cam::normalize_format(const std::string &format)
   return format_lower;
 }
 
+// 지원 포맷과 요청 포맷을 각각 정규화한 뒤 일치 여부를 반환한다.
 bool usb_cam::is_format_supported(
     const std::string &supported_format, const std::string &requested_format)
 {

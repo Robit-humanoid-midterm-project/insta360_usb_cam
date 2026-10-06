@@ -1,3 +1,6 @@
+// 파일 역할: 카메라 드라이버를 ROS 수명주기 노드로 운영하고 영상·보정 정보·팬틸트 상태를 발행한다.
+// configure에서 준비하고 activate에서 발행을 시작하며, deactivate/cleanup에서 정리한다.
+
 #include "../include/usb_cam/insta/pan_tilt_camera_node.hpp"
 #include "rclcpp/rclcpp.hpp"
 
@@ -5,12 +8,14 @@
 
 #include <cv_bridge/cv_bridge.hpp>
 
+// 카메라 수명주기 노드를 만든다. 실제 장치 준비는 on_configure()에서 수행한다.
 PanTiltCamera::PanTiltCamera(const rclcpp::NodeOptions &options)
     : rclcpp_lifecycle::LifecycleNode("pan_tilt_camera_node", options)
 {
   RCLCPP_INFO(this->get_logger(), "PanTiltCamera created.");
 }
 
+// 노드가 사라질 때 카메라 수신 스레드를 먼저 종료한다.
 PanTiltCamera::~PanTiltCamera()
 {
   RCLCPP_WARN(this->get_logger(), "Shutting down");
@@ -20,6 +25,8 @@ PanTiltCamera::~PanTiltCamera()
   }
 }
 
+// 설정과 장치 지원 정보를 확인하고 스트림·발행자·구독자를 준비한다.
+// 팬/틸트 잠금 목표를 장치가 받아들였는지 확인한 뒤 설정 변경 콜백을 등록한다.
 rclcpp_lifecycle::node_interfaces::LifecycleNodeInterface::CallbackReturn
 PanTiltCamera::on_configure(const rclcpp_lifecycle::State &)
 {
@@ -36,6 +43,7 @@ PanTiltCamera::on_configure(const rclcpp_lifecycle::State &)
   int width, height;
   sscanf(resolution_str.c_str(), "%dx%d", &width, &height);
 
+  // 요청 장치를 열어 이름과 지원 설정을 확인한다. 장치를 찾지 못하면 설정 단계를 실패 처리한다.
   m_deviceInfo device_info = camera_->get_device_info(camera_path);
   if (device_info.device_name.empty())
   {
@@ -55,6 +63,7 @@ PanTiltCamera::on_configure(const rclcpp_lifecycle::State &)
   std::vector<float> supported_fps_list;
   std::vector<std::string> supported_formats;
 
+  // 지원 목록과 요청 포맷·해상도·FPS를 비교하고 대체 설정 후보도 모은다.
   for (const auto &supported_format : device_info.formats)
   {
     supported_formats.push_back(supported_format);
@@ -103,6 +112,7 @@ PanTiltCamera::on_configure(const rclcpp_lifecycle::State &)
     }
   }
 
+  // 지원하지 않는 설정이 있으면 목록을 출력하고 해당 항목을 수집된 대체 값으로 바꾼다.
   if (!format_supported || !resolution_supported || !fps_supported)
   {
     RCLCPP_WARN(this->get_logger(), "Requested configuration is not supported.");
@@ -156,6 +166,7 @@ PanTiltCamera::on_configure(const rclcpp_lifecycle::State &)
   image_width = width;
   image_height = height;
 
+  // 장치 수신을 시작한다. 여기서 성공해야 이후 ROS 영상 발행 준비를 계속한다.
   v4l2_stream_err stream_result = camera_->start_stream(config);
   if (stream_result != STREAM_OK)
   {
@@ -164,6 +175,7 @@ PanTiltCamera::on_configure(const rclcpp_lifecycle::State &)
   }
 
   // image_pub_ = this->create_publisher<sensor_msgs::msg::Image>(topic.c_str(), 1);
+  // 이름은 compressed_image이지만 현재 메시지 타입은 압축 JPEG가 아닌 sensor_msgs/Image이다.
   compressed_image_pub_ =
       this->create_publisher<sensor_msgs::msg::Image>(compressed_topic.c_str(), 1);
   camera_info_pub_ =
@@ -203,6 +215,7 @@ PanTiltCamera::on_configure(const rclcpp_lifecycle::State &)
   return rclcpp_lifecycle::node_interfaces::LifecycleNodeInterface::CallbackReturn::SUCCESS;
 }
 
+// 발행자들을 활성화하고 요청 FPS에 맞춰 최신 영상·보정 정보·팬틸트 상태를 보내는 타이머를 만든다.
 rclcpp_lifecycle::node_interfaces::LifecycleNodeInterface::CallbackReturn
 PanTiltCamera::on_activate(const rclcpp_lifecycle::State &)
 {
@@ -214,17 +227,21 @@ PanTiltCamera::on_activate(const rclcpp_lifecycle::State &)
   compressed_camera_info_pub_->on_activate();
   pan_tilt_status_pub_->on_activate();
 
+  // 타이머는 최신 저장 영상을 발행한다. 새 촬영 완료 이벤트와 직접 연결된 것은 아니므로 같은 영상이 다시 나갈 수 있다.
   timer_ = this->create_wall_timer(std::chrono::milliseconds(1000 / (int)fps), [this]()
                                    {
     if (camera_ && camera_->streaming) {
       cv::Mat frame;
       {
         std::lock_guard<std::mutex> lock(camera_->image_mutex);
+        // cv::Mat 참조를 잠금 안에서 가져온다. 잠금을 푼 후 메시지 변환을 하므로 수신 스레드를 오래 막지 않는다.
         frame = camera_->m_image;
       }
       std_msgs::msg::Header header;
+      // 현재 시각은 발행 시각이다. 센서가 실제로 노출한 촬영 시각을 의미하지 않는다.
       header.stamp = this->now();
       header.frame_id = frame_id;
+      // 빈 영상은 발행하지 않는다. 유효한 영상은 BGR8 메시지로 복사해 보낸다.
       if (!frame.empty()) {
         // sensor_msgs::msg::Image::SharedPtr img_msg =
         //   cv_bridge::CvImage(header, "bgr8", frame).toImageMsg();
@@ -243,6 +260,8 @@ PanTiltCamera::on_activate(const rclcpp_lifecycle::State &)
   return rclcpp_lifecycle::node_interfaces::LifecycleNodeInterface::CallbackReturn::SUCCESS;
 }
 
+// 종횡비를 유지하며 출력 크기로 축소·확대하고 남은 공간에 검은 여백을 넣는다.
+// 보정 정보에 반영할 배율·여백도 기록하지만 현재 발행 타이머에서는 이 함수를 호출하지 않는다.
 cv::Mat PanTiltCamera::letterbox(const cv::Mat &src)
 {
   if (src.empty()) return src;
@@ -297,6 +316,8 @@ cv::Mat PanTiltCamera::letterbox(const cv::Mat &src)
 }
 
 
+// 저장된 배율과 여백을 카메라 K/P 행렬에 반영해 출력 영상용 CameraInfo를 발행한다.
+// compressed라는 이름은 보정 정보의 토픽 이름이며 메시지 자체는 CameraInfo이다.
 void PanTiltCamera::publish_compressed_camera_info(const std_msgs::msg::Header &header)
 {
   sensor_msgs::msg::CameraInfo msg;
@@ -307,9 +328,11 @@ void PanTiltCamera::publish_compressed_camera_info(const std_msgs::msg::Header &
   std::copy(distortion_coeffs.begin(), distortion_coeffs.end(), msg.d.begin());
   std::copy(rectification_matrix.begin(), rectification_matrix.end(), msg.r.begin());
   std::copy(projection_matrix.begin(), projection_matrix.end(), msg.p.begin());
+  // 카메라 보정 행렬은 메시지 필드에 복사할 뿐, 여기서 새로 캘리브레이션하지 않는다.
   std::copy(camera_matrix.begin(), camera_matrix.end(), msg.k.begin());
 
   // 원본 K에서 스케일/패딩 반영
+  // 리사이즈 배율은 초점거리와 주점에, 패딩은 주점에 반영한다.
   double fx = msg.k[0] * last_s_;
   double fy = msg.k[4] * last_s_;
   double cx = msg.k[2] * last_s_ + last_px_;
@@ -333,6 +356,7 @@ void PanTiltCamera::publish_compressed_camera_info(const std_msgs::msg::Header &
   compressed_camera_info_pub_->publish(msg);
 }
 
+// 발행 타이머와 수명주기 발행자를 비활성화하고 카메라 스트림을 정지한다.
 rclcpp_lifecycle::node_interfaces::LifecycleNodeInterface::CallbackReturn
 PanTiltCamera::on_deactivate(const rclcpp_lifecycle::State &)
 {
@@ -355,6 +379,7 @@ PanTiltCamera::on_deactivate(const rclcpp_lifecycle::State &)
   return rclcpp_lifecycle::node_interfaces::LifecycleNodeInterface::CallbackReturn::SUCCESS;
 }
 
+// 카메라와 ROS 발행자·구독자의 참조를 해제해 설정 전 상태로 정리한다.
 rclcpp_lifecycle::node_interfaces::LifecycleNodeInterface::CallbackReturn PanTiltCamera::on_cleanup(
     const rclcpp_lifecycle::State &)
 {
@@ -375,6 +400,7 @@ rclcpp_lifecycle::node_interfaces::LifecycleNodeInterface::CallbackReturn PanTil
   return rclcpp_lifecycle::node_interfaces::LifecycleNodeInterface::CallbackReturn::SUCCESS;
 }
 
+// 현재 수명주기 상태를 기록하고 종료 시 카메라 스트림과 주요 발행자 자원을 정리한다.
 rclcpp_lifecycle::node_interfaces::LifecycleNodeInterface::CallbackReturn
 PanTiltCamera::on_shutdown(const rclcpp_lifecycle::State &state)
 {
@@ -395,6 +421,8 @@ PanTiltCamera::on_shutdown(const rclcpp_lifecycle::State &state)
   return rclcpp_lifecycle::node_interfaces::LifecycleNodeInterface::CallbackReturn::SUCCESS;
 }
 
+// 실행 중 변경 요청을 검사하고 지원하는 영상 품질·팬틸트 설정을 장치에 적용한다.
+// 잠긴 축이나 회전 변경은 하드웨어를 건드리기 전에 요청 전체를 거부한다.
 rcl_interfaces::msg::SetParametersResult PanTiltCamera::on_parameter_change(
     const std::vector<rclcpp::Parameter> &parameters)
 {
@@ -402,6 +430,7 @@ rcl_interfaces::msg::SetParametersResult PanTiltCamera::on_parameter_change(
   result.successful = true;
 
   // Reject the entire request before applying any hardware side effects.
+  // 변경 요청 전체의 잠금 조건을 먼저 검사한다. 금지 항목이 하나라도 있으면 실제 장치 설정 전에 반환한다.
   for (const auto &param : parameters)
   {
     const auto &name = param.get_name();
@@ -535,6 +564,7 @@ rcl_interfaces::msg::SetParametersResult PanTiltCamera::on_parameter_change(
   return result;
 }
 
+// 팬틸트 명령 토픽을 받았을 때 잠기지 않은 축의 값만 장치에 적용한다.
 void PanTiltCamera::pan_tilt_callback(const insta360_usb_cam::msg::InstaPanTiltMsgs::SharedPtr msg)
 {
   if (!pan_locked && msg->pan != pan)
@@ -549,6 +579,7 @@ void PanTiltCamera::pan_tilt_callback(const insta360_usb_cam::msg::InstaPanTiltM
   }
 }
 
+// ROS/YAML 설정을 선언하고 읽는다. 영상 토픽에는 camera_name 접두사를 붙인다.
 void PanTiltCamera::get_param()
 {
   // Camera configuration
@@ -581,6 +612,7 @@ void PanTiltCamera::get_param()
   auto_focus = this->declare_parameter<bool>("auto_focus", true);
   zoom = this->declare_parameter<int>("zoom", -1);
   pan = this->declare_parameter<int>("pan", -1);
+  // 축 잠금은 실행 중 팬틸트 명령으로 장착 방향이 바뀌지 않게 하는 설정이다.
   pan_locked = this->declare_parameter<bool>("pan_locked", false);
   tilt = this->declare_parameter<int>("tilt", -1);
   tilt_locked = this->declare_parameter<bool>("tilt_locked", false);
@@ -622,6 +654,8 @@ void PanTiltCamera::get_param()
   output_resolution_str = this->declare_parameter<std::string>("output_resolution", "640x480");
 }
 
+// 설정 이름의 지원 여부를 확인하고 지정 값을 장치에 쓴다.
+// 값이 -1이면 새 값을 쓰는 대신 현재 장치 값을 조회해 출력한다.
 void PanTiltCamera::set_param(std::string parameter_name, int parameter_value)
 {
   v4l2_queryctrl queryctrl;
@@ -674,6 +708,7 @@ void PanTiltCamera::set_param(std::string parameter_name, int parameter_value)
   }
 }
 
+// 자동 설정이 켜지면 자동 제어 값을 쓰고, 꺼지면 지정한 수동 값을 적용한다.
 void PanTiltCamera::set_param_auto(
     std::string parameter_name, std::string auto_parameter_name, int parameter_value,
     bool auto_parameter_value)
@@ -688,6 +723,7 @@ void PanTiltCamera::set_param_auto(
   }
 }
 
+// 선택한 카메라 설정을 출력한 뒤 밝기·노출·초점·줌·방향 등의 값을 장치에 적용한다.
 void PanTiltCamera::set_camera()
 {
   std::cout << std::endl;
@@ -720,6 +756,7 @@ void PanTiltCamera::set_camera()
   std::cout << std::endl;
 }
 
+// YAML에서 읽은 K/D/R/P 보정값과 현재 영상 크기를 CameraInfo 메시지로 발행한다.
 void PanTiltCamera::publish_camera_info(const std_msgs::msg::Header &header)
 {
   sensor_msgs::msg::CameraInfo camera_info_msg;
@@ -735,6 +772,7 @@ void PanTiltCamera::publish_camera_info(const std_msgs::msg::Header &header)
   camera_info_pub_->publish(camera_info_msg);
 }
 
+// 장치에서 팬/틸트의 최소·최대 값과 변경 간격을 조회해 상태 메시지용으로 보관한다.
 bool PanTiltCamera::initialize_pan_tilt_information()
 {
   v4l2_queryctrl queryctrl;
@@ -772,6 +810,7 @@ bool PanTiltCamera::initialize_pan_tilt_information()
   return true;
 }
 
+// 장치의 현재 팬/틸트 값, 허용 범위, 변경 간격을 시각과 함께 발행한다.
 void PanTiltCamera::publish_pan_tilt_status()
 {
   int control_id = 0;
@@ -794,11 +833,13 @@ void PanTiltCamera::publish_pan_tilt_status()
   pan_tilt_status_pub_->publish(status_msg);
 }
 
+// ROS 초기화 후 configure → activate 전환이 성공했는지 확인하고 노드를 실행한다.
 int main(int argc, char **argv)
 {
   rclcpp::init(argc, argv);
   auto node = std::make_shared<PanTiltCamera>();
 
+  // 수명주기 전환 결과가 기대 상태인지 확인한다. 준비가 실패하면 발행을 시작하지 않는다.
   auto configure_result =
       node->trigger_transition(lifecycle_msgs::msg::Transition::TRANSITION_CONFIGURE);
   if (configure_result.id() != lifecycle_msgs::msg::State::PRIMARY_STATE_INACTIVE)
