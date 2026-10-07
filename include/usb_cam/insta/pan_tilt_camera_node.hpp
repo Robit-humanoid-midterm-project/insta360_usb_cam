@@ -85,7 +85,7 @@ private:
   std::shared_ptr<usb_cam> camera_;
 
   rclcpp_lifecycle::LifecyclePublisher<sensor_msgs::msg::Image>::SharedPtr image_pub_;
-  rclcpp_lifecycle::LifecyclePublisher<sensor_msgs::msg::Image>::SharedPtr compressed_image_pub_;
+  rclcpp_lifecycle::LifecyclePublisher<sensor_msgs::msg::CompressedImage>::SharedPtr compressed_image_pub_;
   rclcpp_lifecycle::LifecyclePublisher<insta360_usb_cam::msg::PanTiltStatusMsgs>::SharedPtr pan_tilt_status_pub_;
   rclcpp_lifecycle::LifecyclePublisher<sensor_msgs::msg::CameraInfo>::SharedPtr camera_info_pub_;
   rclcpp_lifecycle::LifecyclePublisher<sensor_msgs::msg::CameraInfo>::SharedPtr compressed_camera_info_pub_;

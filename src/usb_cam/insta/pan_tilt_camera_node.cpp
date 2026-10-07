@@ -7,6 +7,7 @@
 #include <sensor_msgs/msg/image.hpp>
 
 #include <cv_bridge/cv_bridge.hpp>
+#include <opencv2/imgcodecs.hpp>
 
 // 카메라 수명주기 노드를 만든다. 실제 장치 준비는 on_configure()에서 수행한다.
 PanTiltCamera::PanTiltCamera(const rclcpp::NodeOptions &options)
@@ -174,10 +175,10 @@ PanTiltCamera::on_configure(const rclcpp_lifecycle::State &)
     return rclcpp_lifecycle::node_interfaces::LifecycleNodeInterface::CallbackReturn::FAILURE;
   }
 
-  // image_pub_ = this->create_publisher<sensor_msgs::msg::Image>(topic.c_str(), 1);
-  // 이름은 compressed_image이지만 현재 메시지 타입은 압축 JPEG가 아닌 sensor_msgs/Image이다.
+  image_pub_ = this->create_publisher<sensor_msgs::msg::Image>(topic.c_str(), 1);
+  // Publish real JPEG data on the compressed topic; keep raw Image for calibration tools.
   compressed_image_pub_ =
-      this->create_publisher<sensor_msgs::msg::Image>(compressed_topic.c_str(), 1);
+      this->create_publisher<sensor_msgs::msg::CompressedImage>(compressed_topic.c_str(), 1);
   camera_info_pub_ =
       this->create_publisher<sensor_msgs::msg::CameraInfo>(camera_info_topic.c_str(), 5);
   compressed_camera_info_pub_ =
@@ -221,7 +222,7 @@ PanTiltCamera::on_activate(const rclcpp_lifecycle::State &)
 {
   RCLCPP_INFO(this->get_logger(), "Activating PanTiltCamera Lifecycle...");
 
-  //image_pub_->on_activate();
+  image_pub_->on_activate();
   compressed_image_pub_->on_activate();
   camera_info_pub_->on_activate();
   compressed_camera_info_pub_->on_activate();
@@ -243,13 +244,17 @@ PanTiltCamera::on_activate(const rclcpp_lifecycle::State &)
       header.frame_id = frame_id;
       // 빈 영상은 발행하지 않는다. 유효한 영상은 BGR8 메시지로 복사해 보낸다.
       if (!frame.empty()) {
-        // sensor_msgs::msg::Image::SharedPtr img_msg =
-        //   cv_bridge::CvImage(header, "bgr8", frame).toImageMsg();
-        // image_pub_->publish(*img_msg);
-
-        sensor_msgs::msg::Image::SharedPtr compressed_img_msg =
-          cv_bridge::CvImage(header, "bgr8", frame).toImageMsg();
-        compressed_image_pub_->publish(*compressed_img_msg);
+        if (image_pub_->get_subscription_count() > 0) {
+          auto raw_msg = cv_bridge::CvImage(header, "bgr8", frame).toImageMsg();
+          image_pub_->publish(*raw_msg);
+        }
+        sensor_msgs::msg::CompressedImage jpeg_msg;
+        jpeg_msg.header = header;
+        jpeg_msg.format = "jpeg";
+        if (cv::imencode(".jpg", frame, jpeg_msg.data,
+                         {cv::IMWRITE_JPEG_QUALITY, 90})) {
+          compressed_image_pub_->publish(jpeg_msg);
+        }
       }
       publish_camera_info(header);
       publish_compressed_camera_info(header);

@@ -42,6 +42,12 @@ source install/setup.bash
 ros2 launch insta360_usb_cam usb_cam.launch.py
 ```
 
+The camera publishes actual JPEG `sensor_msgs/msg/CompressedImage` on
+`/camera1/camera/compressed_image`. The uncompressed `sensor_msgs/msg/Image`
+remains available on `/camera1/camera/image_raw` for calibration and is sent
+only while a subscriber needs it. After rebuilding, stop and restart the
+already-running camera process; an old process keeps publishing the old message type.
+
 To select a device explicitly, use `device:=/dev/videoN`. The launch fails with an error if that path does not exist or automatic detection does not find exactly one capture node.
 
 ## 수정부분
