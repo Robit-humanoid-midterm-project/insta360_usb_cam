@@ -1,7 +1,9 @@
 // 파일 역할: Linux V4L2 장치와 직접 통신하는 카메라 드라이버 구현.
 // 장치 정보 조회, 스트림 버퍼 관리, 영상 수신·디코딩·축소, 카메라 제어 값 읽기·쓰기를 담당한다.
 
+
 #include "../include/usb_cam/insta/usb_camera.hpp"
+
 
 // 아직 스트리밍하지 않는 상태와 유효하지 않은 장치 파일 번호(-1)로 초기화한다.
 usb_cam::usb_cam() : streaming(false), m_fd(-1)
@@ -119,7 +121,7 @@ v4l2_stream_err usb_cam::start_stream(const m_deviceConfig &config)
   fmt.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
   fmt.fmt.pix.width = config.resolution.first;
   fmt.fmt.pix.height = config.resolution.second;
-
+ 
   // 요청 문자열을 V4L2 픽셀 포맷으로 매핑한다. 아래 수신 루프의 디코딩 경로와는 별도 설정이다.
   std::string normalized_format = normalize_format(config.format);
 
