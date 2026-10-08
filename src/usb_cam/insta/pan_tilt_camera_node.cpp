@@ -53,6 +53,7 @@ PanTiltCamera::on_configure(const rclcpp_lifecycle::State &)
     RCLCPP_ERROR(this->get_logger(), "Failed to retrieve device info for %s", camera_path.c_str());
     return rclcpp_lifecycle::node_interfaces::LifecycleNodeInterface::CallbackReturn::FAILURE;
   }
+  
 
   bool format_supported = false;
   bool resolution_supported = false;
