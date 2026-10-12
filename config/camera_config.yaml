@@ -26,7 +26,7 @@
     pan: 0
     # Keep ROS pan commands from moving the camera after startup.
     pan_locked: true
-    tilt: -77000
+    tilt: 0
     tilt_locked: true
     rotate: 0
     horizontal_flip: false
